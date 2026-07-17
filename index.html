@@ -244,6 +244,97 @@ flashQuad.position.set(0.07, -0.015, -0.44);
 weaponGroup.add(flashQuad);
 
 /* =============================================
+   PROCEDURAL AUDIO (Web Audio API)
+   ============================================= */
+let audioCtx = null;
+let masterGain = null;
+let soundsPlayed = 0;
+
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.3;
+    masterGain.connect(audioCtx.destination);
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().catch(() => {});
+  }
+  return audioCtx;
+}
+
+function playGunshot() {
+  const ctx = ensureAudioCtx();
+  soundsPlayed++;
+  const dur = 0.15;
+  const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = 'lowpass';
+  filt.frequency.value = 2500 + Math.random() * 3500;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(1.0, ctx.currentTime);
+  env.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+  src.connect(filt);
+  filt.connect(env);
+  env.connect(masterGain);
+  src.start(ctx.currentTime);
+  src.stop(ctx.currentTime + dur);
+}
+
+function playImpact() {
+  const ctx = ensureAudioCtx();
+  soundsPlayed++;
+  const dur = 0.06;
+  const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = 'highpass';
+  filt.frequency.value = 3000;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0.4, ctx.currentTime);
+  env.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+  src.connect(filt);
+  filt.connect(env);
+  env.connect(masterGain);
+  src.start(ctx.currentTime);
+  src.stop(ctx.currentTime + dur);
+}
+
+function playFootstep() {
+  const ctx = ensureAudioCtx();
+  soundsPlayed++;
+  const dur = 0.08;
+  const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = 'bandpass';
+  filt.frequency.value = 600 + Math.random() * 400;
+  filt.Q.value = 1.2;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0.12, ctx.currentTime);
+  env.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+  src.connect(filt);
+  filt.connect(env);
+  env.connect(masterGain);
+  src.start(ctx.currentTime);
+  src.stop(ctx.currentTime + dur);
+}
+
+if (testMode) {
+  ensureAudioCtx();
+}
+
+/* =============================================
    SHOOTING / DECALS
    ============================================= */
 const MAX_DECALS = 50;
@@ -273,6 +364,9 @@ function shoot() {
   // Weapon-model recoil kick
   recoilOffset = 0.04;
 
+  // Play gunshot sound
+  playGunshot();
+
   // Raycast from camera center
   raycaster.setFromCamera(tempVec2, camera);
   const hits = raycaster.intersectObjects(levelMeshes, false);
@@ -300,6 +394,9 @@ function shoot() {
     scene.add(decal);
     decals.push({ mesh: decal, time: performance.now() });
 
+    // Play impact sound
+    playImpact();
+
     // Cap at MAX_DECALS
     while (decals.length > MAX_DECALS) {
       const oldest = decals.shift();
@@ -319,6 +416,7 @@ function shoot() {
 if (!testMode) {
   renderer.domElement.addEventListener('mousedown', e => {
     if (e.button === 0 && document.pointerLockElement === renderer.domElement) {
+      ensureAudioCtx();
       shoot();
     }
   });
@@ -338,7 +436,9 @@ const gameHook = {
       yaw,
       pitch: pitch + recoilPitch,
       decals: decals.length,
-      shots: shotsFired
+      shots: shotsFired,
+      audio: !!audioCtx,
+      soundsPlayed: soundsPlayed
     };
   },
   fire() { shoot(); }
@@ -356,6 +456,7 @@ window.addEventListener('resize', () => {
 const SPEED = 6.0;
 let lastTime = performance.now();
 let firstFrame = true;
+let footstepTimer = 0;
 
 /* Pre-allocated Euler for camera rotation (avoids per-frame allocation) */
 const tempEuler = new THREE.Euler(0, 0, 0, 'YXZ');
@@ -375,7 +476,14 @@ function animate(now) {
   if (inp.l) { mx -= cos; mz += sin; }
   if (inp.r) { mx += cos; mz -= sin; }
   const len = Math.hypot(mx, mz);
+  const moving = len > 0;
   if (len > 0) { mx /= len; mz /= len; resolveCollision(px + mx * SPEED * dt, pz + mz * SPEED * dt); }
+
+  // Footsteps — soft noise tap every ~0.4 s while moving
+  if (moving) {
+    footstepTimer -= dt;
+    if (footstepTimer <= 0) { playFootstep(); footstepTimer = 0.4; }
+  }
 
   // Camera recoil recovery: exponential decay, settles within ~1.5s
   if (recoilPitch > 0.0005) {
