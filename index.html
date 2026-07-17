@@ -14,8 +14,7 @@
 <script type="importmap">
 { "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-  } }
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
 </script>
 <script type="module">
 import * as THREE from 'three';
@@ -67,94 +66,106 @@ const matCrate   = new THREE.MeshStandardMaterial({ color: 0xb89a62, roughness: 
 const matCrate2  = new THREE.MeshStandardMaterial({ color: 0xa6874a, roughness: 0.85 });
 const matCrate3  = new THREE.MeshStandardMaterial({ color: 0xc49a55, roughness: 0.75 });
 
-/* --- Helper: wall box --- */
-function addBox(w, h, d, x, y, z, mat) {
+/* --- AABB collision list (walls + crates only — ground excluded) --- */
+const colliders = [];
+
+/* --- Helper: solid box (wall/crate) — added to colliders --- */
+function addSolid(w, h, d, x, y, z, mat) {
   const g = new THREE.BoxGeometry(w, h, d);
   const m = new THREE.Mesh(g, mat);
   m.position.set(x, y, z);
   m.castShadow = true;
   m.receiveShadow = true;
   scene.add(m);
+  colliders.push(new THREE.Box3().setFromObject(m));
   return m;
 }
 
-/* --- Ground plane --- */
-addBox(80, 0.2, 80, 0, -0.1, 0, matGround);
+/* --- Ground plane (NOT a collider) --- */
+(function() {
+  const g = new THREE.BoxGeometry(80, 0.2, 80);
+  const m = new THREE.Mesh(g, matGround);
+  m.position.set(0, -0.1, 0);
+  m.receiveShadow = true;
+  scene.add(m);
+})();
 
 /* --- Sealed outer perimeter walls (|x|<=40, |z|<=40) --- */
 const wallH = 5, wallT = 1.0;
-addBox(80 + wallT*2, wallH, wallT, 0, wallH/2, -40, matWall);
-addBox(80 + wallT*2, wallH, wallT, 0, wallH/2,  40, matWall);
-addBox(wallT, wallH, 80 + wallT*2, -40, wallH/2, 0, matWall);
-addBox(wallT, wallH, 80 + wallT*2,  40, wallH/2, 0, matWall);
+addSolid(80 + wallT*2, wallH, wallT, 0, wallH/2, -40, matWall);
+addSolid(80 + wallT*2, wallH, wallT, 0, wallH/2,  40, matWall);
+addSolid(wallT, wallH, 80 + wallT*2, -40, wallH/2, 0, matWall);
+addSolid(wallT, wallH, 80 + wallT*2,  40, wallH/2, 0, matWall);
 
 /* --- Inner walls --- */
-addBox(12, 3.0, wallT,  -8, 1.5,  -5, matWall2);
-addBox(12, 3.5, wallT,  -8, 1.75,  5, matWall3);
-addBox(10, 2.5, wallT,  10, 1.25,  0, matWall);
-addBox(8, 3.0, wallT,  20, 1.5, -10, matWall2);
-addBox(wallT, 2.8, 14, -15, 1.4, 0, matWall3);
-addBox(6, 2.0, wallT,   5, 1.0, 15, matWall);
-addBox(6, 3.2, wallT, -18, 1.6, 12, matWall2);
+addSolid(12, 3.0, wallT,  -8, 1.5,  -5, matWall2);
+addSolid(12, 3.5, wallT,  -8, 1.75,  5, matWall3);
+addSolid(10, 2.5, wallT,  10, 1.25,  0, matWall);
+addSolid(8, 3.0, wallT,  20, 1.5, -10, matWall2);
+addSolid(wallT, 2.8, 14, -15, 1.4, 0, matWall3);
+addSolid(6, 2.0, wallT,   5, 1.0, 15, matWall);
+addSolid(6, 3.2, wallT, -18, 1.6, 12, matWall2);
 
-/* --- Crates (at least 6) --- */
+/* --- Crates --- */
 const cratePos = [
   [ 5, 0.5,  3], [-5, 0.5,  8], [12, 0.5, -6], [-12, 0.5, -3],
   [ 0, 0.5, -12], [15, 0.5, 10], [-20, 0.5,  5], [ 8, 0.5, 18],
 ];
 const crateMats = [matCrate, matCrate2, matCrate3];
-cratePos.forEach((p, i) => addBox(1, 1, 1, p[0], p[1], p[2], crateMats[i % 3]));
+cratePos.forEach((p, i) => addSolid(1, 1, 1, p[0], p[1], p[2], crateMats[i % 3]));
 
-/* --- AABB collision --- */
-const colliders = [];
-scene.traverse(obj => {
-  if (obj.isMesh && obj.geometry.type === 'BoxGeometry') {
-    const bb = new THREE.Box3().setFromObject(obj);
-    colliders.push(bb);
-  }
-});
+/* --- Per-axis AABB collision resolution --- */
+const PRADIUS = 0.3;        // half-width: player is ~0.6 m wide
+const PLAYERTOP = 0.1;      // extra height above eye for head
+const PLAYERFEET = 1.7;     // distance from eye down to feet (py - PLAYERFEET = 0)
 
-function resolveCollision(newX, newZ, radius, height) {
-  const testX = new THREE.Box3(
-    new THREE.Vector3(newX - radius, py - height, pz - radius),
-    new THREE.Vector3(newX + radius, py + 0.1, pz + radius)
+function resolveCollision(newX, newZ) {
+  // Resolve X axis: test new X with current Z
+  const boxX = new THREE.Box3(
+    new THREE.Vector3(newX - PRADIUS, py - PLAYERFEET, pz - PRADIUS),
+    new THREE.Vector3(newX + PRADIUS, py + PLAYERTOP, pz + PRADIUS)
   );
-  const testZ = new THREE.Box3(
-    new THREE.Vector3(px - radius, py - height, newZ - radius),
-    new THREE.Vector3(px + radius, py + 0.1, newZ + radius)
+  // Resolve Z axis: test current X with new Z
+  const boxZ = new THREE.Box3(
+    new THREE.Vector3(px - PRADIUS, py - PLAYERFEET, newZ - PRADIUS),
+    new THREE.Vector3(px + PRADIUS, py + PLAYERTOP, newZ + PRADIUS)
   );
   let xOk = true, zOk = true;
   for (const bb of colliders) {
-    if (testX.intersectsBox(bb)) xOk = false;
-    if (testZ.intersectsBox(bb)) zOk = false;
+    if (boxX.intersectsBox(bb)) xOk = false;
+    if (boxZ.intersectsBox(bb)) zOk = false;
   }
   if (xOk) px = newX;
   if (zOk) pz = newZ;
 }
 
-/* --- Input state --- */
-const keys = { f: 0, b: 0, l: 0, r: 0 };
+/* --- Input: keyboard (normal mode only) --- */
+const keyState = { f: 0, b: 0, l: 0, r: 0 };
 document.addEventListener('keydown', e => {
-  if (e.key === 'w' || e.key === 'W') keys.f = 1;
-  if (e.key === 's' || e.key === 'S') keys.b = 1;
-  if (e.key === 'a' || e.key === 'A') keys.l = 1;
-  if (e.key === 'd' || e.key === 'D') keys.r = 1;
+  if (e.key === 'w' || e.key === 'W') keyState.f = 1;
+  if (e.key === 's' || e.key === 'S') keyState.b = 1;
+  if (e.key === 'a' || e.key === 'A') keyState.l = 1;
+  if (e.key === 'd' || e.key === 'D') keyState.r = 1;
 });
 document.addEventListener('keyup', e => {
-  if (e.key === 'w' || e.key === 'W') keys.f = 0;
-  if (e.key === 's' || e.key === 'S') keys.b = 0;
-  if (e.key === 'a' || e.key === 'A') keys.l = 0;
-  if (e.key === 'd' || e.key === 'D') keys.r = 0;
+  if (e.key === 'w' || e.key === 'W') keyState.f = 0;
+  if (e.key === 's' || e.key === 'S') keyState.b = 0;
+  if (e.key === 'a' || e.key === 'A') keyState.l = 0;
+  if (e.key === 'd' || e.key === 'D') keyState.r = 0;
 });
 
-/* --- Mouse look (pointer lock, non-test only) --- */
+/* --- Input: test-mode flags (separate from keyboard) --- */
+const testInput = { f: 0, b: 0, l: 0, r: 0 };
+
+/* --- Mouse look (pointer lock, normal mode only) --- */
 if (!testMode) {
   renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
   document.addEventListener('mousemove', e => {
     if (document.pointerLockElement !== renderer.domElement) return;
     yaw   -= e.movementX * 0.002;
     pitch -= e.movementY * 0.002;
-    pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, pitch));
+    const PITCH_MAX = 89 * Math.PI / 180;
+    pitch = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, pitch));
   });
 }
 
@@ -162,7 +173,7 @@ if (!testMode) {
 const gameHook = {
   ready: false,
   testMode: testMode,
-  input: testMode ? keys : { f:0, b:0, l:0, r:0 },
+  input: testInput,
   look(y, p) { yaw = y; pitch = p; },
   getState() { return { x: px, y: py, z: pz, yaw, pitch, decals: 0, shots: 0 }; },
   fire() {}
@@ -177,7 +188,7 @@ window.addEventListener('resize', () => {
 });
 
 /* --- Main loop --- */
-const SPEED = 6.0, PRADIUS = 0.4, PHEIGHT = 1.7;
+const SPEED = 6.0;
 let lastTime = performance.now();
 let firstFrame = true;
 
@@ -187,15 +198,15 @@ function animate(now) {
   lastTime = now;
   dt = Math.min(dt, 0.1);
 
-  const inp = testMode ? gameHook.input : keys;
+  const inp = testMode ? testInput : keyState;
   const cos = Math.cos(yaw), sin = Math.sin(yaw);
   let dx = 0, dz = 0;
-  if (inp.f) { dx += cos * SPEED * dt; dz += sin * SPEED * dt; }
-  if (inp.b) { dx -= cos * SPEED * dt; dz -= sin * SPEED * dt; }
-  if (inp.l) { dx += sin * SPEED * dt; dz -= cos * SPEED * dt; }
-  if (inp.r) { dx -= sin * SPEED * dt; dz += cos * SPEED * dt; }
+  if (inp.f) { dx +=  cos * SPEED * dt; dz +=  sin * SPEED * dt; }
+  if (inp.b) { dx -=  cos * SPEED * dt; dz -=  sin * SPEED * dt; }
+  if (inp.l) { dx +=  sin * SPEED * dt; dz -= cos * SPEED * dt; }
+  if (inp.r) { dx -=  sin * SPEED * dt; dz += cos * SPEED * dt; }
 
-  if (dx !== 0 || dz !== 0) resolveCollision(px + dx, pz + dz, PRADIUS, PHEIGHT);
+  if (dx !== 0 || dz !== 0) resolveCollision(px + dx, pz + dz);
 
   camera.position.set(px, py, pz);
   const euler = new THREE.Euler(pitch, yaw, 0, 'YXZ');
