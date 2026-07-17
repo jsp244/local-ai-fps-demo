@@ -76,11 +76,25 @@ const matCrate   = new THREE.MeshStandardMaterial({ color: 0xb89a62, roughness: 
 const matCrate2  = new THREE.MeshStandardMaterial({ color: 0xa6874a, roughness: 0.85 });
 const matCrate3  = new THREE.MeshStandardMaterial({ color: 0xc49a55, roughness: 0.75 });
 
+/* --- Target / dummy materials --- */
+const matPole  = new THREE.MeshStandardMaterial({ color: 0x666666, roughness: 0.8 });
+const matBoard = new THREE.MeshStandardMaterial({ color: 0xf0e6d3, roughness: 0.9 });
+const matRing1 = new THREE.MeshStandardMaterial({ color: 0x2244aa, roughness: 0.8 });
+const matRing2 = new THREE.MeshStandardMaterial({ color: 0xcc2222, roughness: 0.8 });
+const matBull  = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.7 });
+
+const matDummyTorso = new THREE.MeshStandardMaterial({ color: 0x5577aa, roughness: 0.8 });
+const matDummyHead  = new THREE.MeshStandardMaterial({ color: 0xc4956a, roughness: 0.9 });
+const matDummyLegs  = new THREE.MeshStandardMaterial({ color: 0x334466, roughness: 0.85 });
+
 /* --- AABB collision list (walls + crates only — ground excluded) --- */
 const colliders = [];
 
 /* --- Collect ALL level geometry meshes for raycasting --- */
 const levelMeshes = [];
+
+/* --- Dynamic objects for raycasting (targets + dummies) --- */
+const dynamicMeshes = [];
 
 /* --- Helper: solid box (wall/crate) — added to colliders --- */
 function addSolid(w, h, d, x, y, z, mat) {
@@ -129,7 +143,184 @@ const cratePos = [
 const crateMats = [matCrate, matCrate2, matCrate3];
 cratePos.forEach((p, i) => addSolid(1, 1, 1, p[0], p[1], p[2], crateMats[i % 3]));
 
-/* --- Per-axis AABB collision resolution --- */
+/* =============================================
+   TARGETS
+   ============================================= */
+const targets = [];
+
+function createTarget(tx, tz) {
+  const boardY = 1.2;
+  const group = new THREE.Group();
+  group.position.set(tx, 0, tz);
+
+  // Thin pole
+  const poleH = boardY - 0.15;
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.02, 0.02, poleH, 6),
+    matPole
+  );
+  pole.position.y = poleH / 2;
+  group.add(pole);
+
+  // Board - thin cylinder, radius 0.35, facing spawn (toward origin)
+  // Direction toward origin from board
+  const dx = -tx, dz = -tz;
+  const dist = Math.hypot(dx, dz);
+  if (dist > 0) {
+    const angle = Math.atan2(dx, dz);
+    // Board faces toward origin: rotate so front normal points to origin
+    group.rotation.y = angle;
+  }
+
+  // Board base disc at y = boardY
+  const boardDisc = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.35, 0.35, 0.02, 16),
+    matBoard
+  );
+  boardDisc.position.y = boardY;
+  boardDisc.rotation.x = Math.PI / 2; // face camera direction
+  group.add(boardDisc);
+
+  // Bullseye rings - 3 stacked slightly-offset discs
+  const ring1 = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.25, 0.25, 0.01, 16),
+    matRing1
+  );
+  ring1.position.y = boardY;
+  ring1.position.z = 0.005; // slight offset toward viewer
+  ring1.rotation.x = Math.PI / 2;
+  group.add(ring1);
+
+  const ring2 = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.15, 0.15, 0.01, 16),
+    matRing2
+  );
+  ring2.position.y = boardY;
+  ring2.position.z = 0.01;
+  ring2.rotation.x = Math.PI / 2;
+  group.add(ring2);
+
+  const bull = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.06, 0.01, 16),
+    matBull
+  );
+  bull.position.y = boardY;
+  bull.position.z = 0.015;
+  bull.rotation.x = Math.PI / 2;
+  group.add(bull);
+
+  scene.add(group);
+
+  // Add all meshes to dynamic raycast list
+  const targetMeshes = [];
+  group.traverse(child => {
+    if (child.isMesh) {
+      dynamicMeshes.push(child);
+      targetMeshes.push(child);
+    }
+  });
+
+  const targetData = {
+    group,
+    meshes: targetMeshes,
+    boardY,
+    baseRotY: group.rotation.y,
+    tiltAmount: 0,
+    tiltRecovery: 0,
+    hit: false
+  };
+  targets.push(targetData);
+  return targetData;
+}
+
+// Place 4 targets at varied distances (8-25 units from origin)
+// Ensure >2u from origin, unobstructed LOS from (0,1.7,0)
+createTarget(15, -18);  // ~23.2u from origin
+createTarget(22, -12);  // ~25.1u from origin
+createTarget(-18, -15); // ~23.4u from origin
+createTarget(-25, -10); // ~26.9u from origin
+
+/* =============================================
+   DUMMIES (patrolling humanoids)
+   ============================================= */
+const dummies = [];
+let targetsHit = 0;
+let dummyHits = 0;
+let dummiesFrozen = false;
+
+function createDummy(id, waypoints) {
+  const group = new THREE.Group();
+  group.position.set(waypoints[0][0], 0, waypoints[0][2]);
+
+  // Legs (darker box)
+  const legs = new THREE.Mesh(
+    new THREE.BoxGeometry(0.4, 0.6, 0.3),
+    matDummyLegs
+  );
+  legs.position.y = 0.3;
+  group.add(legs);
+
+  // Torso (box, center at y=1.0)
+  const torso = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.7, 0.35),
+    matDummyTorso
+  );
+  torso.position.y = 1.0;
+  group.add(torso);
+
+  // Head (sphere, at top of torso)
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 8, 8),
+    matDummyHead
+  );
+  head.position.y = 1.55;
+  group.add(head);
+
+  scene.add(group);
+
+  // Add meshes to dynamic raycast list
+  const dummyMeshes = [];
+  group.traverse(child => {
+    if (child.isMesh) {
+      dynamicMeshes.push(child);
+      dummyMeshes.push(child);
+    }
+  });
+
+  const dummyData = {
+    id,
+    group,
+    meshes: dummyMeshes,
+    waypoints,
+    currentWaypoint: 0,
+    patrolSpeed: 2.0,
+    alive: true,
+    falling: false,
+    fallAmount: 0,
+    fallRecovery: 0,
+    respawnTimer: 0,
+    baseX: waypoints[0][0],
+    baseZ: waypoints[0][2]
+  };
+  dummies.push(dummyData);
+  return dummyData;
+}
+
+// Create 3 dummies with patrol waypoints
+// Waypoints chosen in open areas, avoiding walls, crates, targets, perimeter
+createDummy(0, [
+  [10, 0, 8],   [16, 0, 8],   [16, 0, 2],   [10, 0, 2]
+]);
+createDummy(1, [
+  [-10, 0, -15], [-10, 0, -22], [-5, 0, -22], [-5, 0, -15]
+]);
+createDummy(2, [
+  [25, 0, -5],   [25, 0, -12],  [30, 0, -12],  [30, 0, -5]
+]);
+
+/* =============================================
+   Per-axis AABB collision resolution
+   ============================================= */
 const PRADIUS = 0.3;
 const PLAYERTOP = 0.1;
 const PLAYERFEET = 1.7;
@@ -330,6 +521,29 @@ function playFootstep() {
   src.stop(ctx.currentTime + dur);
 }
 
+function playHit() {
+  const ctx = ensureAudioCtx();
+  soundsPlayed++;
+  const dur = 0.10;
+  const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = 'bandpass';
+  filt.frequency.value = 5000;
+  filt.Q.value = 2.0;
+  const env = ctx.createGain();
+  env.gain.setValueAtTime(0.5, ctx.currentTime);
+  env.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+  src.connect(filt);
+  filt.connect(env);
+  env.connect(masterGain);
+  src.start(ctx.currentTime);
+  src.stop(ctx.currentTime + dur);
+}
+
 if (testMode) {
   ensureAudioCtx();
 }
@@ -355,6 +569,21 @@ const tempVec3e = new THREE.Vector3();
 const tempVec3f = new THREE.Vector3();
 const tempQuat = new THREE.Quaternion();
 
+function findHitDummy(hitMesh) {
+  for (const d of dummies) {
+    if (!d.alive) continue;
+    if (d.meshes.includes(hitMesh)) return d;
+  }
+  return null;
+}
+
+function findHitTarget(hitMesh) {
+  for (const t of targets) {
+    if (t.meshes.includes(hitMesh)) return t;
+  }
+  return null;
+}
+
 function shoot() {
   shotsFired++;
 
@@ -367,12 +596,45 @@ function shoot() {
   // Play gunshot sound
   playGunshot();
 
-  // Raycast from camera center
+  // Raycast from camera center — include dynamic objects (targets + dummies)
   raycaster.setFromCamera(tempVec2, camera);
-  const hits = raycaster.intersectObjects(levelMeshes, false);
+  const allMeshes = [...dynamicMeshes, ...levelMeshes];
+  const hits = raycaster.intersectObjects(allMeshes, false);
 
   if (hits.length > 0) {
     const hit = hits[0];
+    const hitMesh = hit.object;
+
+    // Check if hit a dummy (alive ones)
+    const hitDummy = findHitDummy(hitMesh);
+    if (hitDummy) {
+      dummyHits++;
+      hitDummy.alive = false;
+      hitDummy.falling = true;
+      hitDummy.fallAmount = 0;
+      playHit();
+      // Muzzle flash
+      muzzleFlashTimer = 0.05;
+      muzzleLight.intensity = 3;
+      flashMat.opacity = 0.9;
+      return;
+    }
+
+    // Check if hit a target
+    const hitTarget = findHitTarget(hitMesh);
+    if (hitTarget) {
+      targetsHit++;
+      hitTarget.tiltAmount = -0.3; // tilt back
+      hitTarget.hit = true;
+      playHit();
+      // Muzzle flash
+      muzzleFlashTimer = 0.05;
+      muzzleLight.intensity = 3;
+      flashMat.opacity = 0.9;
+      return;
+    }
+
+    // Hit static level geometry — create impact decal
     const normal = hit.face ? hit.face.normal.clone() : tempVec3e.set(0, 1, 0);
     // Transform normal to world space
     const worldNormal = normal.applyQuaternion(hit.object.quaternion);
@@ -431,6 +693,8 @@ const gameHook = {
   input: testInput,
   look(y, p) { yaw = y; pitch = p; },
   getState() {
+    const targetPositions = targets.map(t => ({ x: t.group.position.x, z: t.group.position.z }));
+    const dummyPositions = dummies.map(d => ({ x: d.group.position.x, z: d.group.position.z }));
     return {
       x: px, y: py, z: pz,
       yaw,
@@ -438,10 +702,16 @@ const gameHook = {
       decals: decals.length,
       shots: shotsFired,
       audio: !!audioCtx,
-      soundsPlayed: soundsPlayed
+      soundsPlayed: soundsPlayed,
+      targets: targetPositions,
+      targetsHit,
+      dummies: dummyPositions,
+      dummyHits
     };
   },
-  fire() { shoot(); }
+  fire() { shoot(); },
+  freezeDummies(flag) { dummiesFrozen = !!flag; },
+  teleport(x, z) { px = x; pz = z; }
 };
 window.__game = gameHook;
 
@@ -490,6 +760,72 @@ function animate(now) {
     recoilPitch *= Math.pow(0.05, dt);
   } else if (recoilPitch > 0) {
     recoilPitch = 0;
+  }
+
+  // --- Target tilt recovery ---
+  for (const t of targets) {
+    if (t.hit) {
+      t.tiltRecovery += dt;
+      // Recover over ~0.5s using ease-out
+      const progress = Math.min(1, t.tiltRecovery / 0.5);
+      const eased = 1 - (1 - progress) * (1 - progress);
+      t.group.rotation.y = t.baseRotY + t.tiltAmount * (1 - eased);
+      if (progress >= 1) {
+        t.group.rotation.y = t.baseRotY;
+        t.hit = false;
+        t.tiltRecovery = 0;
+      }
+    }
+  }
+
+  // --- Dummy patrol + fall animation ---
+  for (const d of dummies) {
+    if (!d.alive) {
+      // Falling animation: rotate to ground over ~0.4s
+      d.fallAmount += dt / 0.4;
+      if (d.fallAmount >= 1) {
+        d.fallAmount = 1;
+        // Respawn after 3s
+        d.respawnTimer += dt;
+        if (d.respawnTimer >= 3.0) {
+          d.respawnTimer = 0;
+          d.alive = true;
+          d.falling = false;
+          d.fallAmount = 0;
+          d.group.rotation.set(0, 0, 0);
+          d.group.position.set(d.baseX, 0, d.baseZ);
+          d.currentWaypoint = 0;
+          // Make meshes visible again
+          d.group.traverse(child => { if (child.isMesh) child.visible = true; });
+        }
+      } else {
+        // Rotate forward to ground
+        const eased = d.fallAmount * d.fallAmount; // ease in
+        d.group.rotation.x = Math.PI / 2 * eased;
+      }
+      continue;
+    }
+
+    // Patrol movement (skip if frozen)
+    if (!dummiesFrozen) {
+      const wp = d.waypoints[d.currentWaypoint];
+      const targetX = wp[0], targetZ = wp[2];
+      const dx = targetX - d.group.position.x;
+      const dz = targetZ - d.group.position.z;
+      const dist = Math.hypot(dx, dz);
+
+      if (dist < 0.15) {
+        // Reached waypoint, move to next
+        d.currentWaypoint = (d.currentWaypoint + 1) % d.waypoints.length;
+      } else {
+        // Move toward waypoint
+        const moveDist = Math.min(dist, d.patrolSpeed * dt);
+        d.group.position.x += (dx / dist) * moveDist;
+        d.group.position.z += (dz / dist) * moveDist;
+        // Face travel direction
+        d.group.rotation.y = Math.atan2(dx, dz);
+      }
+    }
   }
 
   camera.position.set(px, py, pz);
