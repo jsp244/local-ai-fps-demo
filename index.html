@@ -369,13 +369,13 @@ function animate(now) {
   // Movement
   const inp = testMode ? testInput : keyState;
   const cos = Math.cos(yaw), sin = Math.sin(yaw);
-  let dx = 0, dz = 0;
-  if (inp.f) { dx +=  cos * SPEED * dt; dz +=  sin * SPEED * dt; }
-  if (inp.b) { dx -=  cos * SPEED * dt; dz -=  sin * SPEED * dt; }
-  if (inp.l) { dx +=  sin * SPEED * dt; dz -= cos * SPEED * dt; }
-  if (inp.r) { dx -=  sin * SPEED * dt; dz += cos * SPEED * dt; }
-
-  if (dx !== 0 || dz !== 0) resolveCollision(px + dx, pz + dz);
+  let mx = 0, mz = 0;
+  if (inp.f) { mx -= sin; mz -= cos; }
+  if (inp.b) { mx += sin; mz += cos; }
+  if (inp.l) { mx -= cos; mz += sin; }
+  if (inp.r) { mx += cos; mz -= sin; }
+  const len = Math.hypot(mx, mz);
+  if (len > 0) { mx /= len; mz /= len; resolveCollision(px + mx * SPEED * dt, pz + mz * SPEED * dt); }
 
   // Camera recoil recovery: exponential decay, settles within ~1.5s
   if (recoilPitch > 0.0005) {
