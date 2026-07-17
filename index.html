@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FPS Demo - Dust 2</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:#000}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+/* --- Test-mode detection --- */
+const testMode = location.search.includes('test=1');
+
+/* --- Renderer --- */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(testMode ? 1 : Math.min(window.devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+/* --- Scene & background --- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87CEEB);
+
+/* --- Camera / player state --- */
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.2, 200);
+let yaw = 0, pitch = 0;
+let px = 0, py = 1.7, pz = 0;
+camera.position.set(px, py, pz);
+
+/* --- Lighting --- */
+const ambient = new THREE.AmbientLight(0xffeedd, 0.5);
+scene.add(ambient);
+
+const sun = new THREE.DirectionalLight(0xfff4e0, 1.8);
+sun.position.set(15, 30, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.left = -40;
+sun.shadow.camera.right = 40;
+sun.shadow.camera.top = 40;
+sun.shadow.camera.bottom = -40;
+sun.shadow.camera.near = 1;
+sun.shadow.camera.far = 80;
+scene.add(sun);
+scene.add(sun.target);
+
+/* --- Materials --- */
+const matGround  = new THREE.MeshStandardMaterial({ color: 0xd2b48c, roughness: 1.0 });
+const matWall    = new THREE.MeshStandardMaterial({ color: 0xcfb58f, roughness: 0.9 });
+const matWall2   = new THREE.MeshStandardMaterial({ color: 0xd4b980, roughness: 0.85 });
+const matWall3   = new THREE.MeshStandardMaterial({ color: 0xc9a96e, roughness: 0.95 });
+const matCrate   = new THREE.MeshStandardMaterial({ color: 0xb89a62, roughness: 0.8 });
+const matCrate2  = new THREE.MeshStandardMaterial({ color: 0xa6874a, roughness: 0.85 });
+const matCrate3  = new THREE.MeshStandardMaterial({ color: 0xc49a55, roughness: 0.75 });
+
+/* --- Helper: wall box --- */
+function addBox(w, h, d, x, y, z, mat) {
+  const g = new THREE.BoxGeometry(w, h, d);
+  const m = new THREE.Mesh(g, mat);
+  m.position.set(x, y, z);
+  m.castShadow = true;
+  m.receiveShadow = true;
+  scene.add(m);
+  return m;
+}
+
+/* --- Ground plane --- */
+addBox(80, 0.2, 80, 0, -0.1, 0, matGround);
+
+/* --- Sealed outer perimeter walls (|x|<=40, |z|<=40) --- */
+const wallH = 5, wallT = 1.0;
+addBox(80 + wallT*2, wallH, wallT, 0, wallH/2, -40, matWall);
+addBox(80 + wallT*2, wallH, wallT, 0, wallH/2,  40, matWall);
+addBox(wallT, wallH, 80 + wallT*2, -40, wallH/2, 0, matWall);
+addBox(wallT, wallH, 80 + wallT*2,  40, wallH/2, 0, matWall);
+
+/* --- Inner walls --- */
+addBox(12, 3.0, wallT,  -8, 1.5,  -5, matWall2);
+addBox(12, 3.5, wallT,  -8, 1.75,  5, matWall3);
+addBox(10, 2.5, wallT,  10, 1.25,  0, matWall);
+addBox(8, 3.0, wallT,  20, 1.5, -10, matWall2);
+addBox(wallT, 2.8, 14, -15, 1.4, 0, matWall3);
+addBox(6, 2.0, wallT,   5, 1.0, 15, matWall);
+addBox(6, 3.2, wallT, -18, 1.6, 12, matWall2);
+
+/* --- Crates (at least 6) --- */
+const cratePos = [
+  [ 5, 0.5,  3], [-5, 0.5,  8], [12, 0.5, -6], [-12, 0.5, -3],
+  [ 0, 0.5, -12], [15, 0.5, 10], [-20, 0.5,  5], [ 8, 0.5, 18],
+];
+const crateMats = [matCrate, matCrate2, matCrate3];
+cratePos.forEach((p, i) => addBox(1, 1, 1, p[0], p[1], p[2], crateMats[i % 3]));
+
+/* --- AABB collision --- */
+const colliders = [];
+scene.traverse(obj => {
+  if (obj.isMesh && obj.geometry.type === 'BoxGeometry') {
+    const bb = new THREE.Box3().setFromObject(obj);
+    colliders.push(bb);
+  }
+});
+
+function resolveCollision(newX, newZ, radius, height) {
+  const testX = new THREE.Box3(
+    new THREE.Vector3(newX - radius, py - height, pz - radius),
+    new THREE.Vector3(newX + radius, py + 0.1, pz + radius)
+  );
+  const testZ = new THREE.Box3(
+    new THREE.Vector3(px - radius, py - height, newZ - radius),
+    new THREE.Vector3(px + radius, py + 0.1, newZ + radius)
+  );
+  let xOk = true, zOk = true;
+  for (const bb of colliders) {
+    if (testX.intersectsBox(bb)) xOk = false;
+    if (testZ.intersectsBox(bb)) zOk = false;
+  }
+  if (xOk) px = newX;
+  if (zOk) pz = newZ;
+}
+
+/* --- Input state --- */
+const keys = { f: 0, b: 0, l: 0, r: 0 };
+document.addEventListener('keydown', e => {
+  if (e.key === 'w' || e.key === 'W') keys.f = 1;
+  if (e.key === 's' || e.key === 'S') keys.b = 1;
+  if (e.key === 'a' || e.key === 'A') keys.l = 1;
+  if (e.key === 'd' || e.key === 'D') keys.r = 1;
+});
+document.addEventListener('keyup', e => {
+  if (e.key === 'w' || e.key === 'W') keys.f = 0;
+  if (e.key === 's' || e.key === 'S') keys.b = 0;
+  if (e.key === 'a' || e.key === 'A') keys.l = 0;
+  if (e.key === 'd' || e.key === 'D') keys.r = 0;
+});
+
+/* --- Mouse look (pointer lock, non-test only) --- */
+if (!testMode) {
+  renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
+  document.addEventListener('mousemove', e => {
+    if (document.pointerLockElement !== renderer.domElement) return;
+    yaw   -= e.movementX * 0.002;
+    pitch -= e.movementY * 0.002;
+    pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, pitch));
+  });
+}
+
+/* --- Test hook --- */
+const gameHook = {
+  ready: false,
+  testMode: testMode,
+  input: testMode ? keys : { f:0, b:0, l:0, r:0 },
+  look(y, p) { yaw = y; pitch = p; },
+  getState() { return { x: px, y: py, z: pz, yaw, pitch, decals: 0, shots: 0 }; },
+  fire() {}
+};
+window.__game = gameHook;
+
+/* --- Resize --- */
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* --- Main loop --- */
+const SPEED = 6.0, PRADIUS = 0.4, PHEIGHT = 1.7;
+let lastTime = performance.now();
+let firstFrame = true;
+
+function animate(now) {
+  requestAnimationFrame(animate);
+  let dt = (now - lastTime) / 1000;
+  lastTime = now;
+  dt = Math.min(dt, 0.1);
+
+  const inp = testMode ? gameHook.input : keys;
+  const cos = Math.cos(yaw), sin = Math.sin(yaw);
+  let dx = 0, dz = 0;
+  if (inp.f) { dx += cos * SPEED * dt; dz += sin * SPEED * dt; }
+  if (inp.b) { dx -= cos * SPEED * dt; dz -= sin * SPEED * dt; }
+  if (inp.l) { dx += sin * SPEED * dt; dz -= cos * SPEED * dt; }
+  if (inp.r) { dx -= sin * SPEED * dt; dz += cos * SPEED * dt; }
+
+  if (dx !== 0 || dz !== 0) resolveCollision(px + dx, pz + dz, PRADIUS, PHEIGHT);
+
+  camera.position.set(px, py, pz);
+  const euler = new THREE.Euler(pitch, yaw, 0, 'YXZ');
+  camera.quaternion.setFromEuler(euler);
+
+  renderer.render(scene, camera);
+
+  if (firstFrame) { firstFrame = false; gameHook.ready = true; }
+}
+
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
