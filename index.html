@@ -134,19 +134,23 @@ const PRADIUS = 0.3;
 const PLAYERTOP = 0.1;
 const PLAYERFEET = 1.7;
 
+/* Pre-allocated temp objects for collision (no per-call allocation) */
+const tempVec3a = new THREE.Vector3();
+const tempVec3b = new THREE.Vector3();
+const tempVec3c = new THREE.Vector3();
+const tempVec3d = new THREE.Vector3();
+const tempBox3a = new THREE.Box3();
+const tempBox3b = new THREE.Box3();
+
 function resolveCollision(newX, newZ) {
-  const boxX = new THREE.Box3(
-    new THREE.Vector3(newX - PRADIUS, py - PLAYERFEET, pz - PRADIUS),
-    new THREE.Vector3(newX + PRADIUS, py + PLAYERTOP, pz + PRADIUS)
-  );
-  const boxZ = new THREE.Box3(
-    new THREE.Vector3(px - PRADIUS, py - PLAYERFEET, newZ - PRADIUS),
-    new THREE.Vector3(px + PRADIUS, py + PLAYERTOP, newZ + PRADIUS)
-  );
+  tempBox3a.min.set(newX - PRADIUS, py - PLAYERFEET, pz - PRADIUS);
+  tempBox3a.max.set(newX + PRADIUS, py + PLAYERTOP, pz + PRADIUS);
+  tempBox3b.min.set(px - PRADIUS, py - PLAYERFEET, newZ - PRADIUS);
+  tempBox3b.max.set(px + PRADIUS, py + PLAYERTOP, newZ + PRADIUS);
   let xOk = true, zOk = true;
   for (const bb of colliders) {
-    if (boxX.intersectsBox(bb)) xOk = false;
-    if (boxZ.intersectsBox(bb)) zOk = false;
+    if (tempBox3a.intersectsBox(bb)) xOk = false;
+    if (tempBox3b.intersectsBox(bb)) zOk = false;
   }
   if (xOk) px = newX;
   if (zOk) pz = newZ;
@@ -225,7 +229,7 @@ weaponGroup.add(sight);
 // Position weapon group to lower-right of view
 weaponGroup.position.set(0.25, -0.18, -0.45);
 
-/* --- Muzzle flash light --- */
+/* --- Muzzle flash light (single instance, reused each shot) --- */
 const muzzleLight = new THREE.PointLight(0xffaa33, 0, 4, 2);
 muzzleLight.position.set(0.07, -0.015, -0.44);
 weaponGroup.add(muzzleLight);
@@ -246,20 +250,36 @@ const MAX_DECALS = 50;
 const decals = [];          // array of { mesh, time }
 let shotsFired = 0;
 let muzzleFlashTimer = 0;
+
+/* Weapon-model recoil (backswing / muzzle climb) */
 let recoilOffset = 0;
 
+/* Camera pitch recoil (visible in getState().pitch) */
+let recoilPitch = 0;
+
+/* Pre-allocated temp objects for shooting (no per-shot allocation in hot path) */
 const raycaster = new THREE.Raycaster();
+const tempVec2 = new THREE.Vector2();
+const tempVec3e = new THREE.Vector3();
+const tempVec3f = new THREE.Vector3();
+const tempQuat = new THREE.Quaternion();
 
 function shoot() {
   shotsFired++;
 
+  // Camera recoil kick — pitch up ~0.04 rad
+  recoilPitch += 0.04;
+
+  // Weapon-model recoil kick
+  recoilOffset = 0.04;
+
   // Raycast from camera center
-  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  raycaster.setFromCamera(tempVec2, camera);
   const hits = raycaster.intersectObjects(levelMeshes, false);
 
   if (hits.length > 0) {
     const hit = hits[0];
-    const normal = hit.face ? hit.face.normal.clone() : new THREE.Vector3(0, 1, 0);
+    const normal = hit.face ? hit.face.normal.clone() : tempVec3e.set(0, 1, 0);
     // Transform normal to world space
     const worldNormal = normal.applyQuaternion(hit.object.quaternion);
 
@@ -274,9 +294,8 @@ function shoot() {
     decal.position.addScaledVector(worldNormal, 0.01);
 
     // Orient decal to face the normal
-    const up = new THREE.Vector3(0, 1, 0);
-    const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), worldNormal);
-    decal.quaternion.copy(quat);
+    tempQuat.setFromUnitVectors(tempVec3f.set(0, 0, 1), worldNormal);
+    decal.quaternion.copy(tempQuat);
 
     scene.add(decal);
     decals.push({ mesh: decal, time: performance.now() });
@@ -294,9 +313,6 @@ function shoot() {
   muzzleFlashTimer = 0.05; // 50 ms
   muzzleLight.intensity = 3;
   flashMat.opacity = 0.9;
-
-  // Recoil
-  recoilOffset = 0.04;
 }
 
 /* --- Normal-mode click to fire --- */
@@ -319,7 +335,8 @@ const gameHook = {
   getState() {
     return {
       x: px, y: py, z: pz,
-      yaw, pitch,
+      yaw,
+      pitch: pitch + recoilPitch,
       decals: decals.length,
       shots: shotsFired
     };
@@ -340,6 +357,9 @@ const SPEED = 6.0;
 let lastTime = performance.now();
 let firstFrame = true;
 
+/* Pre-allocated Euler for camera rotation (avoids per-frame allocation) */
+const tempEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+
 function animate(now) {
   requestAnimationFrame(animate);
   let dt = (now - lastTime) / 1000;
@@ -357,9 +377,16 @@ function animate(now) {
 
   if (dx !== 0 || dz !== 0) resolveCollision(px + dx, pz + dz);
 
+  // Camera recoil recovery: exponential decay, settles within ~1.5s
+  if (recoilPitch > 0.0005) {
+    recoilPitch *= Math.pow(0.05, dt);
+  } else if (recoilPitch > 0) {
+    recoilPitch = 0;
+  }
+
   camera.position.set(px, py, pz);
-  const euler = new THREE.Euler(pitch, yaw, 0, 'YXZ');
-  camera.quaternion.setFromEuler(euler);
+  tempEuler.set(pitch + recoilPitch, yaw, 0);
+  camera.quaternion.setFromEuler(tempEuler);
 
   // Muzzle flash decay
   if (muzzleFlashTimer > 0) {
@@ -370,7 +397,7 @@ function animate(now) {
     }
   }
 
-  // Recoil recovery
+  // Weapon-model recoil recovery
   if (recoilOffset > 0) {
     recoilOffset *= 0.85;
     if (recoilOffset < 0.001) recoilOffset = 0;
